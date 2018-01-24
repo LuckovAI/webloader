@@ -5,6 +5,7 @@
 """
 
 import os
+import sys
 import logging
 import logging.handlers
 from webloader.utils import Database, Service, load_config_entity, gen_guid, Rebbit
@@ -22,7 +23,7 @@ class TaskImpl(object):
     steps = ['step1', 'step2', 'step3']
     flheader = ['fheader_step1', 'fheader_step2', 'fheader_step3']
     flimport = ['fimport_step1', 'fimport_step2', 'fimport_step3']
-
+    
     def __init__(self, entity, conf):
         self._conf = conf
         self._entity = entity
@@ -35,41 +36,43 @@ class TaskImpl(object):
         self._init_rebbit()
         # сессия одного главного цикла(для передачи специфичных данных от шага к шагу)
         self._session = {}
-
+        
     def _init_rebbit(self):
         self._rebbit = Rebbit(logger=self._file_log,
-                              host=self._conf['rebbitmq_host'],
-                              port=self._conf['rebbitmq_port'],
-                              virtual_host=self._conf['rebbitmq_virtual_host'],
-                              user=self._conf['rebbitmq_user'],
-                              password=self._conf['rebbitmq_password'],
-                              ssl=self._conf['rebbitmq_ssl'])
-
+                           host=self._conf['rebbitmq_host'],
+                           port=self._conf['rebbitmq_port'],
+                           virtual_host=self._conf['rebbitmq_virtual_host'],
+                           user=self._conf['rebbitmq_user'],
+                           password=self._conf['rebbitmq_password'],
+                           ssl=self._conf['rebbitmq_ssl'])
+        
     async def fstep(self, step):
         """
         Загружаем и импортируем, каждый активный для сущности шаг
         """
         if int(self._conf_entity[step]['active_webload_step']): await self.load_data(step)
         if int(self._conf_entity[step]['active_import_step']): await self.import_data(step)
-
+            
     def _fix_pickle(self):
         """Костыль для пикл"""
-        # можно было вынести в инициализацию но пикл не серриализирует модули
-        self._spec_module_entity = import_module('webloader.entities.' + self._entity)
-        # аналогично лог
+        #можно было вынести в инициализацию но пикл не серриализирует модули
+        self._spec_module_entity = import_module('webloader.entities.'+self._entity)
+        #аналогично лог
         log_form = logging.Formatter(self._conf['format'], self._conf['dateformat'])
         rotation_handler = logging.handlers.RotatingFileHandler( \
             self._path_log, 'ab', maxBytes=self._conf['maxBytes'], \
             backupCount=self._conf['backupCount'], encoding='utf8')
         rotation_handler.setFormatter(log_form)
         self._file_log.addHandler(rotation_handler)
-
+        
     async def run(self):
         """
         Точка входа. Обычно для обработки любой сущности хватает 2,3-х шагов
         """
-        self._fix_pickle()
-        [await self.fstep(i) for i in TaskImpl.steps]
+        while(True):
+            self._fix_pickle()
+            [await self.fstep(i) for i in TaskImpl.steps]
+            await asyncio.sleep(int(self._conf['interval_sec']))
 
     async def import_data(self, step):
         """
@@ -85,7 +88,7 @@ class TaskImpl(object):
             pkg_path = os.path.join(inbox, pkg)
             self._file_log.info(u'pkg_path %s: %s' % (step, pkg_path))
             implist.append(pkg_path)
-
+            
         self._file_log.info(u'implist %s: %s' % (step, implist))
         # Импортируем пакеты
         [await self.import_file(f, step) for f in implist]
@@ -96,8 +99,7 @@ class TaskImpl(object):
     async def import_file(self, pkg_path, step):
         self._file_log.info(u'import_file(%s)' % pkg_path)
         garbage = os.path.join(self._conf['tmp_store'], self._entity, step, 'garbage')
-        res = await getattr(self._spec_module_entity, TaskImpl.fdimport[step])(self._entity, self._db, self._rebbit,
-                                                                               self._file_log, pkg_path, self._session)
+        res=await getattr(self._spec_module_entity, TaskImpl.fdimport[step])(self._entity, self._db, self._rebbit, self._file_log, pkg_path, self._session)
         self._file_log.info(u'Результат импорта файла: %s' % res)
         # Манипулируем с файликами для хранения истории и очистки
         basename = os.path.basename(pkg_path)
@@ -110,7 +112,7 @@ class TaskImpl(object):
         shutil.move(pkg_path, res_path)
         self._file_log.info(u'Файл(сущность) %s обработана' % pkg_path)
         return
-
+        
     async def load_data(self, step):
         """
         Загружает архив с сервера и сохраняет во временную директорию
@@ -128,11 +130,11 @@ class TaskImpl(object):
                 msg = u'Попытка N%s получения не удалась. %s' % (i, exc)
                 self._file_log.info(msg)
                 await asyncio.sleep(int(self._conf_entity[step]['sleep']))
-
+        
         if not resp:
             self._file_log.info(u'Get запроса %s ничего не вернул' % step)
             return
-
+        
         if not resp.get('result'):
             self._file_log.info(u'Get запроса %s ничего не вернул' % step)
             return
@@ -142,7 +144,7 @@ class TaskImpl(object):
         async with aiofiles.open(path, 'wb') as hndl:
             await hndl.write(json.dumps(resp['result']).encode())
         self._file_log.info(u'Ответ Get запроса %s загружен. %s' % (step, path))
-
+        
         inbox = os.path.join(self._conf['tmp_store'], self._entity, step, 'inbox')
         try:
             # Распаковываем
@@ -157,25 +159,25 @@ class TaskImpl(object):
         diff = (datetime.now() - start).total_seconds()
         self._file_log.info(u'Общеее время получения данных %s %s' % (step, diff))
         return
-
+    
     async def get_cookie(self):
-        await self._db.start_transaction()
-        res = await self._db.fetch("select cookie from bs where code = $1", (self._entity,))
-        await self._db.commit()
-        dres = dict(res[0])
-        cookie = {'Cookie': dres['cookie']} if dres['cookie'] else {}
-        return cookie
+            await self._db.start_transaction()
+            res = await self._db.fetch("select cookie from bs where code = $1", (self._entity,))
+            await self._db.commit()
+            dres = dict(res[0])
+            cookie = {'Cookie':dres['cookie']} if dres['cookie'] else {}
+            return cookie
 
     async def set_cookie(self, cookie):
-        if not cookie: return
-        await self._db.start_transaction()
-        await self._db.execute("update bs set cookie = $1 where code = $2", (cookie, self._entity))
-        await self._db.commit()
-
+            if not cookie: return
+            await self._db.start_transaction()
+            await self._db.execute("update bs set cookie = $1 where code = $2", (cookie, self._entity))
+            await self._db.commit()
+        
     def _init_srv(self, entity):
-        # имя модуля с специфичной реализацией для сущности совпадает с наименованием сущности
-        # можно было вынести в инициализацию но пикл не серриализирует модули
-        spec_module_entity = import_module('webloader.entities.' + entity)
+        #имя модуля с специфичной реализацией для сущности совпадает с наименованием сущности
+        #можно было вынести в инициализацию но пикл не серриализирует модули
+        spec_module_entity = import_module('webloader.entities.'+entity)
         srv1 = Service(logger=self._file_log,
                        get_cookie=self.get_cookie,
                        set_cookie=self.set_cookie,
@@ -200,16 +202,17 @@ class TaskImpl(object):
                        headers=getattr(spec_module_entity, TaskImpl.flheader[2])(),
                        params=self._conf_entity['step3']['params'],
                        ssl=self._conf_entity['step3']['ssl'])
-        self._srv.update({'step1': srv1, 'step2': srv2, 'step3': srv3})
-
+        self._srv.update({'step1':srv1, 'step2':srv2, 'step3':srv3})
+        
+        
     def _init_db(self):
         self._db = Database(logger=self._file_log,
-                            host=self._conf['host'],
-                            port=self._conf['port'],
-                            dbname=self._conf['dbname'],
-                            user=self._conf['user'],
-                            password=self._conf['password']
-                            )
+                           host=self._conf['host'],
+                           port=self._conf['port'],
+                           dbname=self._conf['dbname'],
+                           user=self._conf['user'],
+                           password=self._conf['password']
+                           )
 
     def _create_dirs(self, entity):
         """
@@ -243,7 +246,7 @@ class TaskImpl(object):
             step3 = os.path.join(self._conf['tmp_store'], entity, 'step3', name)
             if not os.path.isdir(step3):
                 os.mkdir(step3)
-
+    
     def _init_log(self, name):
         """
         Инициализация лог файла
@@ -267,3 +270,5 @@ class TaskImpl(object):
         self._file_log.addHandler(rotation_handler)"""
         self._file_log.info('TaskImpl::_init_log')
         return True
+
+
