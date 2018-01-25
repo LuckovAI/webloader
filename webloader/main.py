@@ -55,8 +55,8 @@ def run():
         for entity_list_thread in entity_list:
             lfruns_thread = []
             for entity in entity_list_thread:
-                # подготавливаем задания; copy - чтоб избежать синхронизации общих переменных между процессами
-                app = TaskImpl(entity, conf.copy())
+                # подготавливаем задания;
+                app = TaskImpl(entity, conf)
                 lfruns_thread.append(app.run)
             lfruns.append(lfruns_thread)
         #Многопроцессный вариант
@@ -70,9 +70,8 @@ def run():
             res = procs.get()
             
         #Однопроцессный вариант(для тестирования)
-        #while(True):
-            #[__run(lf) for lf in lfruns]            
-            #sleep(int(conf['interval_sec']))
+        #[__run(lf) for lf in lfruns]            
+        #sleep(int(conf['interval_sec']))
     except Exception as exc:
         msg = u'Ошибка выполнения. %s.' % str(exc)
         print(msg)
