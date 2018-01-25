@@ -10,7 +10,6 @@ from webloader.impl import TaskImpl
 from webloader.utils import load_config, chunkify
 import asyncio
 from multiprocessing import Pool
-import aiohttp
 from time import sleep
 
 
