@@ -24,10 +24,15 @@ class TaskImpl(object):
     flheader = ['fheader_step1', 'fheader_step2', 'fheader_step3']
     flimport = ['fimport_step1', 'fimport_step2', 'fimport_step3']
     
+    @classmethod
+    def init_cls(cls):
+        [cls.fdimport.update({a:b}) for a, b in zip(cls.steps, cls.flimport)]
+    
     def __init__(self, entity, conf):
         self._conf = conf
         self._entity = entity
         self._srv = {}
+        self._spec_module_entity = import_module('webloader.entities.' + entity)
         self._init_log(entity)
         self._conf_entity = load_config_entity(entity, self._file_log)
         self._create_dirs(entity)
@@ -53,24 +58,11 @@ class TaskImpl(object):
         if int(self._conf_entity[step]['active_webload_step']): await self.load_data(step)
         if int(self._conf_entity[step]['active_import_step']): await self.import_data(step)
             
-    def _fix_pickle(self):
-        """Костыль для пикл"""
-        #можно было вынести в инициализацию но пикл не серриализирует модули
-        self._spec_module_entity = import_module('webloader.entities.'+self._entity)
-        #аналогично лог
-        log_form = logging.Formatter(self._conf['format'], self._conf['dateformat'])
-        rotation_handler = logging.handlers.RotatingFileHandler( \
-            self._path_log, 'ab', maxBytes=self._conf['maxBytes'], \
-            backupCount=self._conf['backupCount'], encoding='utf8')
-        rotation_handler.setFormatter(log_form)
-        self._file_log.addHandler(rotation_handler)
-        
     async def run(self):
         """
         Точка входа. Обычно для обработки любой сущности хватает 2,3-х шагов
         """
         while(True):
-            self._fix_pickle()
             [await self.fstep(i) for i in TaskImpl.steps]
             await asyncio.sleep(int(self._conf['interval_sec']))
 
@@ -99,7 +91,8 @@ class TaskImpl(object):
     async def import_file(self, pkg_path, step):
         self._file_log.info(u'import_file(%s)' % pkg_path)
         garbage = os.path.join(self._conf['tmp_store'], self._entity, step, 'garbage')
-        res=await getattr(self._spec_module_entity, TaskImpl.fdimport[step])(self._entity, self._db, self._rebbit, self._file_log, pkg_path, self._session)
+        res = await getattr(self._spec_module_entity, TaskImpl.fdimport[step])(self._entity, self._db, self._rebbit, \
+                                                                               self._file_log, pkg_path, self._session)
         self._file_log.info(u'Результат импорта файла: %s' % res)
         # Манипулируем с файликами для хранения истории и очистки
         basename = os.path.basename(pkg_path)
@@ -159,51 +152,47 @@ class TaskImpl(object):
         diff = (datetime.now() - start).total_seconds()
         self._file_log.info(u'Общеее время получения данных %s %s' % (step, diff))
         return
-    
-    async def get_cookie(self):
+        
+    def _init_srv(self, entity):
+        async def get_cookie():
             await self._db.start_transaction()
             res = await self._db.fetch("select cookie from bs where code = $1", (self._entity,))
             await self._db.commit()
             dres = dict(res[0])
             cookie = {'Cookie':dres['cookie']} if dres['cookie'] else {}
             return cookie
-
-    async def set_cookie(self, cookie):
+        async def set_cookie(cookie):
             if not cookie: return
             await self._db.start_transaction()
             await self._db.execute("update bs set cookie = $1 where code = $2", (cookie, self._entity))
             await self._db.commit()
-        
-    def _init_srv(self, entity):
+            
         #имя модуля с специфичной реализацией для сущности совпадает с наименованием сущности
-        #можно было вынести в инициализацию но пикл не серриализирует модули
-        spec_module_entity = import_module('webloader.entities.'+entity)
         srv1 = Service(logger=self._file_log,
-                       get_cookie=self.get_cookie,
-                       set_cookie=self.set_cookie,
+                       get_cookie=get_cookie,
+                       set_cookie=set_cookie,
                        host=self._conf_entity['step1']['host'],
                        port=self._conf_entity['step1']['port'],
-                       headers=getattr(spec_module_entity, TaskImpl.flheader[0])(),
+                       headers=getattr(self._spec_module_entity, TaskImpl.flheader[0])(),
                        params=self._conf_entity['step1']['params'],
                        ssl=self._conf_entity['step1']['ssl'])
         srv2 = Service(logger=self._file_log,
-                       get_cookie=self.get_cookie,
-                       set_cookie=self.set_cookie,
+                       get_cookie=get_cookie,
+                       set_cookie=set_cookie,
                        host=self._conf_entity['step2']['host'],
                        port=self._conf_entity['step2']['port'],
-                       headers=getattr(spec_module_entity, TaskImpl.flheader[1])(),
+                       headers=getattr(self._spec_module_entity, TaskImpl.flheader[1])(),
                        params=self._conf_entity['step2']['params'],
                        ssl=self._conf_entity['step2']['ssl'])
         srv3 = Service(logger=self._file_log,
-                       get_cookie=self.get_cookie,
-                       set_cookie=self.set_cookie,
+                       get_cookie=get_cookie,
+                       set_cookie=set_cookie,
                        host=self._conf_entity['step3']['host'],
                        port=self._conf_entity['step3']['port'],
-                       headers=getattr(spec_module_entity, TaskImpl.flheader[2])(),
+                       headers=getattr(self._spec_module_entity, TaskImpl.flheader[2])(),
                        params=self._conf_entity['step3']['params'],
                        ssl=self._conf_entity['step3']['ssl'])
         self._srv.update({'step1':srv1, 'step2':srv2, 'step3':srv3})
-        
         
     def _init_db(self):
         self._db = Database(logger=self._file_log,
@@ -262,13 +251,11 @@ class TaskImpl(object):
             'CRITICAL': logging.CRITICAL
         }
         self._file_log.setLevel(logging_level_map[self._conf['log_level']])
-        """log_form = logging.Formatter(self._conf['format'], self._conf['dateformat'])
+        log_form = logging.Formatter(self._conf['format'], self._conf['dateformat'])
         rotation_handler = logging.handlers.RotatingFileHandler( \
             self._path_log, 'ab', maxBytes=self._conf['maxBytes'], \
             backupCount=self._conf['backupCount'], encoding='utf8')
         rotation_handler.setFormatter(log_form)
-        self._file_log.addHandler(rotation_handler)"""
+        self._file_log.addHandler(rotation_handler)
         self._file_log.info('TaskImpl::_init_log')
         return True
-
-

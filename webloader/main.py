@@ -3,6 +3,7 @@
 @author Lukashov_ai
 @python 3.6
 """
+
 import os
 import sys
 import fcntl
@@ -13,10 +14,10 @@ from multiprocessing import Pool
 from time import sleep
 
 
-def __run(lfrun):
+def __run(lent_conf):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(asyncio.gather(*[fr() for fr in lfrun]))
+    loop.run_until_complete(asyncio.gather(*[TaskImpl(*ent_conf).run() for ent_conf in lent_conf]))
     loop.close()
         
         
@@ -44,32 +45,31 @@ def run():
         sys.exit(0)
         
     # Инициализируем статические члены класса
-    [TaskImpl.fdimport.update({a:b}) for a, b in zip(TaskImpl.steps, TaskImpl.flimport)]
+    TaskImpl.init_cls()
     try:
         #разбиваем список сущностей по процессам и потокам(асинхронным)
         #Сначала инициализируем объекты заданий которые передадим в отдельные процессы
         #Инициализация происходит в синхронном режиме в главном процессе
         entity_list = chunkify(conf['entity_list'], int(conf['thread_count_in_process']))
-        lfruns = []
+        lent_confs = []
         for entity_list_thread in entity_list:
-            lfruns_thread = []
+            lent_confs_thread = []
             for entity in entity_list_thread:
                 # подготавливаем задания;
-                app = TaskImpl(entity, conf)
-                lfruns_thread.append(app.run)
-            lfruns.append(lfruns_thread)
+                lent_confs_thread.append((entity, conf))
+            lent_confs.append(lent_confs_thread)
         #Многопроцессный вариант
         with Pool(int(conf['process_count'])) as p:
             # для каждой пачки сущностей(бирж которые опрашивают) отдельный процесс
             # для каждой сущности асинхронный поток
-            procs = p.map_async(__run, lfruns, 1)
+            procs = p.map_async(__run, lent_confs, 1)
             # ждать пока все выполнятся, иначе просто завершится главный процесс, а дочерние прервутся
             # нужно чтоб пока выполняются дочерние процессы можно было работать в главном процессе
             procs.wait()
             res = procs.get()
             
         #Однопроцессный вариант(для тестирования)
-        #[__run(lf) for lf in lfruns]            
+        #[__run(lf) for lf in lent_confs]            
         #sleep(int(conf['interval_sec']))
     except Exception as exc:
         msg = u'Ошибка выполнения. %s.' % str(exc)
